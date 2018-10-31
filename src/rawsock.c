@@ -9,12 +9,12 @@
 #include "logger.h"
 #include "main-ptrace.h"
 #include "string_s.h"
-#include "rawsock-pfring.h"
+#include "stub-pcap.h"
+#include "stub-pfring.h"
 #include "pixie-timer.h"
 #include "main-globals.h"
 
-#include "rawsock-pcap.h"
-
+#include "unusedparm.h"
 #include <assert.h>
 #include <ctype.h>
 
@@ -382,7 +382,7 @@ int rawsock_recv_packet(
 
         *length = hdr.caplen;
         *secs = (unsigned)hdr.ts.tv_sec;
-        *usecs = hdr.ts.tv_usec;
+        *usecs = (unsigned)hdr.ts.tv_usec;
     }
 
 
@@ -478,6 +478,7 @@ rawsock_win_name(const char *ifname)
 void
 rawsock_ignore_transmits(struct Adapter *adapter, const unsigned char *adapter_mac)
 {
+    UNUSEDPARM(adapter_mac);
     if (adapter->ring) {
         /* PORTABILITY: don't do anything for PF_RING, because it's
          * actually done when we create the adapter, because we can't
@@ -626,6 +627,10 @@ rawsock_init_adapter(const char *adapter_name,
     struct Adapter *adapter;
     char errbuf[PCAP_ERRBUF_SIZE];
 
+    /* BPF filter not supported on some platforms, so ignore this compiler
+     * warning when unused */
+    UNUSEDPARM(bpf_filter);
+
     adapter = (struct Adapter *)malloc(sizeof(*adapter));
     if (adapter == NULL)
         exit(1);
@@ -747,12 +752,25 @@ rawsock_init_adapter(const char *adapter_name,
                         adapter_name+5,         /* interface name */
                         errbuf);
         } else {
+#if 0
             adapter->pcap = PCAP.open_live(
                         adapter_name,           /* interface name */
                         65536,                  /* max packet size */
                         8,                      /* promiscuous mode */
                         1000,                   /* read timeout in milliseconds */
                         errbuf);
+#else
+            /* We need to replace "pcap_open_live()" with "pcap_create()/pcap_set_XXX()/pcap_activate()" */
+            adapter->pcap = PCAP.create(adapter_name, errbuf);
+            if (adapter->pcap) {
+                PCAP.set_snaplen(adapter->pcap, 65536);
+                PCAP.set_promisc(adapter->pcap, 8);
+                PCAP.set_timeout(adapter->pcap, 1000);
+                PCAP.set_immediate_mode(adapter->pcap, 1);
+                PCAP.activate(adapter->pcap);
+            }
+
+#endif
         }
 
         if (adapter->pcap == NULL) {

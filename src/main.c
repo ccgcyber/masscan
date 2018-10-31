@@ -37,7 +37,7 @@
 #include "output.h"             /* for outputing results */
 #include "rte-ring.h"           /* producer/consumer ring buffer */
 #include "rawsock-pcapfile.h"   /* for saving pcap files w/ raw packets */
-#include "rawsock-pcap.h"       /* dynamically load libpcap library */
+#include "stub-pcap.h"       /* dynamically load libpcap library */
 #include "smack.h"              /* Aho-corasick state-machine pattern-matcher */
 #include "pixie-timer.h"        /* portable time functions */
 #include "pixie-threads.h"      /* portable threads */
@@ -53,8 +53,10 @@
 #include "crypto-base64.h"      /* base64 encode/decode */
 #include "pixie-backtrace.h"
 #include "proto-sctp.h"
-#include "script.h"
+#include "vulncheck.h"          /* checking vulns like monlist, poodle, heartblee */
 #include "main-readrange.h"
+#include "scripting.h"
+#include "read-service-probes.h"
 
 #include <assert.h>
 #include <limits.h>
@@ -83,6 +85,7 @@ unsigned volatile is_rx_done = 0;
 time_t global_now;
 
 uint64_t usec_start;
+
 
 /***************************************************************************
  * We create a pair of transmit/receive threads for each network adapter.
@@ -305,7 +308,7 @@ transmit_thread(void *v) /*aka. scanning_thread() */
     throttler_start(throttler, masscan->max_rate/masscan->nic_count);
 
 infinite:
-
+    
     /* Create the shuffler/randomizer. This creates the 'range' variable,
      * which is simply the number of IP addresses times the number of
      * ports */
@@ -484,6 +487,7 @@ infinite:
         uint64_t batch_size;
 
         for (k=0; k<1000; k++) {
+            
             /*
              * Only send a few packets at a time, throttled according to the max
              * --max-rate set by the user
@@ -558,7 +562,7 @@ receive_thread(void *v)
     parms->total_tcbs = status_tcb_count;
 
     LOG(1, "THREAD: recv: starting thread #%u\n", parms->nic_index);
-
+    
     /* Lock this thread to a CPU. Transmit threads are on even CPUs,
      * receive threads on odd CPUs */
     if (pixie_cpu_get_count() > 1) {
@@ -601,6 +605,9 @@ receive_thread(void *v)
     if (masscan->is_banners) {
         struct TcpCfgPayloads *pay;
 
+        /*
+         * Create TCP connection table
+         */
         tcpcon = tcpcon_create_table(
             (size_t)((masscan->max_rate/5) / masscan->nic_count),
             parms->transmit_queue,
@@ -611,6 +618,16 @@ receive_thread(void *v)
             masscan->tcb.timeout,
             masscan->seed
             );
+        
+        /*
+         * Initialize TCP scripting
+         */
+        scripting_init_tcp(tcpcon, masscan->scripting.L);
+        
+        
+        /*
+         * Set some flags [kludge]
+         */
         tcpcon_set_banner_flags(tcpcon,
                 masscan->is_capture_cert,
                 masscan->is_capture_html,
@@ -621,6 +638,11 @@ receive_thread(void *v)
                                     "http-user-agent",
                                     masscan->http_user_agent_length,
                                     masscan->http_user_agent);
+        if (masscan->is_hello_smbv1)
+            tcpcon_set_parameter(   tcpcon,
+                                 "hello",
+                                 1,
+                                 "smbv1");
         if (masscan->is_hello_ssl)
             tcpcon_set_parameter(   tcpcon,
                                  "hello",
@@ -658,7 +680,7 @@ receive_thread(void *v)
                                  foo);
         }
         
-        for (pay = masscan->tcp_payloads; pay; pay = pay->next) {
+        for (pay = masscan->payloads.tcp; pay; pay = pay->next) {
             char name[64];
             sprintf_s(name, sizeof(name), "hello-string[%u]", pay->port);
             tcpcon_set_parameter(   tcpcon, 
@@ -713,13 +735,12 @@ receive_thread(void *v)
                     &secs,
                     &usecs,
                     &px);
-
         if (err != 0) {
             if (tcpcon)
                 tcpcon_timeouts(tcpcon, (unsigned)time(0), 0);
             continue;
         }
-
+        
 
         /*
          * Do any TCP event timeouts based on the current timestamp from
@@ -786,7 +807,7 @@ receive_thread(void *v)
                      * than port scanning them */
 
                     /* If we aren't doing an ARP scan, then ignore ARP responses */
-                    if (!masscan->is_arp)
+                    if (!masscan->scan_type.arp)
                         break;
 
                     /* If this response isn't in our range, then ignore it */
@@ -885,7 +906,7 @@ receive_thread(void *v)
                         0, seqno_me, secs, usecs, seqno_them);
                 }
 
-                /* If this contains payload, handle that */
+                /* If this contains payload, handle that second */
                 if (parsed.app_length) {
                     tcpcon_handle(tcpcon, tcb, TCP_WHAT_DATA,
                         px + parsed.app_offset, parsed.app_length,
@@ -963,6 +984,7 @@ receive_thread(void *v)
                         parsed.ip_ttl,
                         parsed.mac_src
                         );
+            
 
             /*
              * Send RST so other side isn't left hanging (only doing this in
@@ -982,7 +1004,7 @@ receive_thread(void *v)
 
 
     LOG(1, "THREAD: recv: stopping thread #%u\n", parms->nic_index);
-
+    
     /*
      * cleanup
      */
@@ -1006,7 +1028,6 @@ end:
 
     /* Thread is about to exit */
     parms->done_receiving = 1;
-
 }
 
 
@@ -1028,8 +1049,14 @@ static void control_c_handler(int x)
         control_c_pressed = 1+x;
         is_tx_done = control_c_pressed;
     } else {
-        control_c_pressed_again = 1;
-        is_rx_done = control_c_pressed_again;
+        if (is_rx_done) {
+            fprintf(stderr, "\nERROR: threads not exiting %d\n", is_rx_done);
+            if (is_rx_done++ > 1)
+                exit(1);
+        } else {
+            control_c_pressed_again = 1;
+            is_rx_done = control_c_pressed_again;
+        }
     }
 
 }
@@ -1053,28 +1080,28 @@ main_scan(struct Masscan *masscan)
     time_t now = time(0);
     struct Status status;
     uint64_t min_index = UINT64_MAX;
-    struct MassScript *script = NULL;
+    struct MassVulnCheck *vulncheck = NULL;
 
     memset(parms_array, 0, sizeof(parms_array));
 
     /*
-     * Script initialization
+     * Vuln check initialization
      */
-    if (masscan->script.name) {
+    if (masscan->vuln_name) {
         unsigned i;
 		unsigned is_error;
-        script = script_lookup(masscan->script.name);
+        vulncheck = vulncheck_lookup(masscan->vuln_name);
         
         /* If no ports specified on command-line, grab default ports */
         is_error = 0;
         if (rangelist_count(&masscan->ports) == 0)
-            rangelist_parse_ports(&masscan->ports, script->ports, &is_error);
+            rangelist_parse_ports(&masscan->ports, vulncheck->ports, &is_error, 0);
         
-        /* Kludge: change normal port range to script range */
+        /* Kludge: change normal port range to vulncheck range */
         for (i=0; i<masscan->ports.count; i++) {
             struct Range *r = &masscan->ports.list[i];
-            r->begin = (r->begin&0xFFFF) | Templ_Script;
-            r->end = (r->end & 0xFFFF) | Templ_Script;
+            r->begin = (r->begin&0xFFFF) | Templ_VulnCheck;
+            r->end = (r->end & 0xFFFF) | Templ_VulnCheck;
         }
     }
     
@@ -1122,7 +1149,7 @@ main_scan(struct Masscan *masscan)
      * trim the nmap UDP payloads down to only those ports we are using. This
      * makes lookups faster at high packet rates.
      */
-    payloads_trim(masscan->payloads, &masscan->ports);
+    payloads_udp_trim(masscan->payloads.udp, &masscan->ports);
 
     /* Optimize target selection so it's a quick binary search instead
      * of walking large memory tables. When we scan the entire Internet
@@ -1180,12 +1207,12 @@ main_scan(struct Masscan *masscan)
          * scanning. Then, we adjust the template with additional features,
          * such as the IP address and so on.
          */
-        parms->tmplset->script = script;
+        parms->tmplset->vulncheck = vulncheck;
         template_packet_init(
                     parms->tmplset,
                     parms->adapter_mac,
                     parms->router_mac,
-                    masscan->payloads,
+                    masscan->payloads.udp,
                     rawsock_datalink(masscan->nic[index].adapter),
                     masscan->seed);
 
@@ -1383,8 +1410,9 @@ main_scan(struct Masscan *masscan)
 
 
 
-        if (time(0) - now >= masscan->wait)
+        if (time(0) - now >= masscan->wait) {
             is_rx_done = 1;
+        }
 
         if (masscan->output.is_status_updates) {
             status_print(&status, min_index, range, rate,
@@ -1486,7 +1514,7 @@ int main(int argc, char *argv[])
     masscan->shard.one = 1;
     masscan->shard.of = 1;
     masscan->min_packet_size = 60;
-    masscan->payloads = payloads_create();
+    masscan->payloads.udp = payloads_udp_create();
     strcpy_s(   masscan->output.rotate.directory,
                 sizeof(masscan->output.rotate.directory),
                 ".");
@@ -1520,7 +1548,18 @@ int main(int argc, char *argv[])
      * either options or a list of IPv4 address ranges.
      */
     masscan_command_line(masscan, argc, argv);
+    
+    /*
+     * Load database files like "nmap-payloads" and "nmap-service-probes"
+     */
+    masscan_load_database_files(masscan);
 
+    /*
+     * Load the scripting engine if needed and run those that were
+     * specified.
+     */
+    if (masscan->is_scripting)
+        scripting_init(masscan);
 
     /* We need to do a separate "raw socket" initialization step. This is
      * for Windows and PF_RING. */
@@ -1645,7 +1684,7 @@ int main(int argc, char *argv[])
             x += siphash24_selftest();
             x += ntp_selftest();
             x += snmp_selftest();
-            x += payloads_selftest();
+            x += payloads_udp_selftest();
             x += blackrock_selftest();
             x += rawsock_selftest();
             x += lcg_selftest();
@@ -1655,6 +1694,7 @@ int main(int argc, char *argv[])
             x += rte_ring_selftest();
             x += mainconf_selftest();
             x += zeroaccess_selftest();
+            x += nmapserviceprobes_selftest();
 
 
             if (x != 0) {

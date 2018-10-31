@@ -46,6 +46,7 @@
 #include <ctype.h>
 #include <string.h>
 
+
 /*****************************************************************************
  *****************************************************************************/
 static int64_t ftell_x(FILE *fp)
@@ -181,7 +182,7 @@ open_rotate(struct Output *out, const char *filename)
             sin.sin_addr.s_addr = htonl(out->redis.ip);
             sin.sin_port = htons((unsigned short)out->redis.port);
             sin.sin_family = AF_INET;
-            x = connect(fd, (struct sockaddr*)&sin, sizeof(sin));
+            x = connect((SOCKET)fd, (struct sockaddr*)&sin, sizeof(sin));
             if (x != 0) {
                 LOG(0, "redis: connect() failed\n");
                 perror("connect");
@@ -671,11 +672,21 @@ oui_from_mac(const unsigned char mac[6])
 {
     unsigned oui = mac[0]<<16 | mac[1]<<8 | mac[2];
     switch (oui) {
+    case 0x001075: return "Seagate";
+    case 0x001e06: return "Odroid";
+    case 0x3497f6: return "Asus";
+    case 0x38f73d: return "Amzon";
+    case 0x60a44c: return "Asus";
+    case 0x6c72e7: return "Apple";
+    case 0x9003b7: return "Parrot";
     case 0x94dbc9: return "Azurewave";
+    case 0xb827eb: return "Raspberry Pi";
+    case 0xacbc32: return "Apple";
     case 0x404a03: return "Zyxel";
     case 0x000c29: return "VMware";
     case 0x002590: return "Supermicro";
     case 0xc0c1c0: return "Cisco-Linksys";
+    case 0xc05627: return "Belkin";
     case 0x2c27d7: return "HP";
     case 0x001132: return "Synology";
     case 0x0022b0: return "D-Link";

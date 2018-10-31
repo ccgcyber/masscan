@@ -1,6 +1,14 @@
+ifneq (, $(shell which clang))
+CC = clang
+else ifneq (, $(shell which gcc))
+CC = gcc
+else
+CC = cc
+endif
+
 PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
-SYS := $(shell gcc -dumpmachine)
+SYS := $(shell $(CC) -dumpmachine)
 GITVER := $(shell git describe --tags)
 INSTALL_DATA := -pDm755
 
@@ -13,7 +21,11 @@ endif
 # environment where things likely will work -- as well as anything
 # works on the bajillion of different Linux environments
 ifneq (, $(findstring linux, $(SYS)))
+ifneq (, $(findstring musl, $(SYS)))
+LIBS = 
+else
 LIBS = -lm -lrt -ldl -lpthread
+endif
 INCLUDES =
 FLAGS2 = 
 endif
@@ -53,20 +65,18 @@ endif
 
 # OpenBSD
 ifneq (, $(findstring openbsd, $(SYS)))
-LIBS = -lm -pthread
+LIBS = -lm -lpthread
 INCLUDES = -I.
 FLAGS2 = 
 endif
 
 # FreeBSD
 ifneq (, $(findstring freebsd, $(SYS)))
-LIBS = -lm -pthread
+LIBS = -lm -lpthread
 INCLUDES = -I.
 FLAGS2 =
 endif
 
-# this works on llvm or real gcc
-CC = clang
 
 DEFINES = 
 CFLAGS = -g -ggdb $(FLAGS2) $(INCLUDES) $(DEFINES) -Wall -O3
