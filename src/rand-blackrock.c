@@ -49,6 +49,7 @@
 */
 #include "rand-blackrock.h"
 #include "pixie-timer.h"
+#include "util-malloc.h"
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
@@ -302,11 +303,8 @@ blackrock_verify(struct BlackRock *br, uint64_t max)
     uint64_t range = br->range;
 
     /* Allocate a list of 1-byte counters */
-    list = (unsigned char *)malloc((size_t)((range<max)?range:max));
-    if (list == NULL)
-        exit(1);
-    memset(list, 0, (size_t)((range<max)?range:max));
-
+    list = CALLOC(1, (size_t)((range<max)?range:max));
+    
     /* For all numbers in the range, verify increment the counter for the
      * the output. */
     for (i=0; i<range; i++) {
@@ -375,7 +373,6 @@ int
 blackrock_selftest(void)
 {
     uint64_t i;
-    int is_success = 0;
     uint64_t range;
 
     /* @marshray
@@ -387,10 +384,11 @@ blackrock_selftest(void)
      */
     {
         struct BlackRock br;
-        uint64_t result, result2;
+        
         blackrock_init(&br, 1000, 0, 4);
 
         for (i=0; i<10; i++) {
+            uint64_t result, result2;
             result = blackrock_shuffle(&br, i);
             result2 = blackrock_unshuffle(&br, result);
             if (i != result2)
@@ -404,6 +402,7 @@ blackrock_selftest(void)
 
     for (i=0; i<5; i++) {
         struct BlackRock br;
+        int is_success;
 
         range += 10 + i;
         range *= 2;
@@ -411,7 +410,6 @@ blackrock_selftest(void)
         blackrock_init(&br, range, time(0), 4);
 
         is_success = blackrock_verify(&br, range);
-
         if (!is_success) {
             fprintf(stderr, "BLACKROCK: randomization failed\n");
             return 1; /*fail*/

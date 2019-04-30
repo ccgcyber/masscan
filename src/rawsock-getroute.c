@@ -5,12 +5,12 @@
     This works on both Linux and windows.
 */
 #include "rawsock.h"
-#include "string_s.h"
-
 #include "ranges.h" /*for parsing IPv4 addresses */
+#include "string_s.h"
+#include "util-malloc.h"
 
 
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__sun__)
 #include <unistd.h>
 #include <sys/socket.h>
 #include <net/route.h>
@@ -32,7 +32,10 @@ get_rt_address(struct rt_msghdr *rtm, int desired)
         if (bitmask & (1 << i)) {
             if ((1<<i) == desired)
                 return sa;
+#ifdef __sun__
+#else
             sa = (struct sockaddr *)(ROUNDUP(sa->sa_len) + (char *)sa);
+#endif
         } else
             ;
     }
@@ -87,9 +90,12 @@ dump_rt_addresses(struct rt_msghdr *rtm)
 
     for (i = 0; i < RTAX_MAX; i++) {
         if (bitmask & (1 << i)) {
+#ifdef __sun__
+#else
             printf("b=%u fam=%u len=%u\n", (1<<i), sa->sa_family, sa->sa_len);
             hexdump(sa, sa->sa_len + sizeof(sa->sa_family));
             sa = (struct sockaddr *)(ROUNDUP(sa->sa_len) + (char *)sa);
+#endif
         } else
             ;
     }
@@ -110,11 +116,8 @@ rawsock_get_default_gateway(const char *ifname, unsigned *ipv4)
      * structure followed by an array of "sockaddr" structures.
      */
     sizeof_buffer = sizeof(*rtm) + sizeof(struct sockaddr_in)*16;
-    rtm = (struct rt_msghdr *)malloc(sizeof_buffer);
-    if (rtm == NULL)
-        exit(1);
-
-
+    rtm = MALLOC(sizeof_buffer);
+    
     /*
      * Create a socket for querying the kernel
      */

@@ -21,6 +21,12 @@
 
 #define VERIFY_REMAINING(n) if (offset+(n) > max) return;
 
+/**
+ * A structure representing the information parsed from an incoming
+ * ARP packet. Note: unlike normal programming style, this isn't
+ * overlayed on the incoming ARP header, but instead each field
+ * is parsed one-by-one and converted into this internal structure.
+ */
 struct ARP_IncomingRequest
 {
     unsigned is_valid;
@@ -100,6 +106,7 @@ arp_resolve_sync(struct Adapter *adapter,
     time_t start;
     unsigned is_arp_notice_given = 0;
     struct ARP_IncomingRequest response;
+    int is_delay_reported = 0;
 
     /*
      * [KLUDGE]
@@ -154,8 +161,8 @@ arp_resolve_sync(struct Adapter *adapter,
     arp_packet[41] = (unsigned char)(your_ipv4 >>  0);
 
 
-    /* kludge me: this is the wrong thing to do
-     * FIXME: */
+    /* Kludge: handle VLNA header if it exists. This is probably
+     * the wrong way to handle this. */
     if (adapter->is_vlan)
         arp_packet -= 4;
     
@@ -177,6 +184,12 @@ arp_resolve_sync(struct Adapter *adapter,
             rawsock_send_packet(adapter, arp_packet, 60, 1);
             if (i++ >= 10)
                 break; /* timeout */
+
+            /* It's taking too long, so notify the user */
+            if (!is_delay_reported) {
+                LOG(0, "...arping router MAC address...\n");
+                is_delay_reported = 1;
+            }
         }
 
         /* If we aren't getting a response back to our ARP, then print a
