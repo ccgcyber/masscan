@@ -44,6 +44,7 @@
 #include "templ-payloads.h"     /* UDP packet payloads */
 #include "proto-snmp.h"         /* parse SNMP responses */
 #include "proto-ntp.h"          /* parse NTP responses */
+#include "proto-coap.h"         /* CoAP selftest */
 #include "templ-port.h"
 #include "in-binary.h"          /* covert binary output to XML/JSON */
 #include "main-globals.h"       /* all the global variables in the program */
@@ -53,10 +54,13 @@
 #include "crypto-base64.h"      /* base64 encode/decode */
 #include "pixie-backtrace.h"
 #include "proto-sctp.h"
+#include "proto-oproto.h"       /* Other protocols on top of IP */
 #include "vulncheck.h"          /* checking vulns like monlist, poodle, heartblee */
 #include "main-readrange.h"
 #include "scripting.h"
+#include "range-file.h"         /* reading ranges from a file */
 #include "read-service-probes.h"
+#include "misc-rstfilter.h"
 #include "util-malloc.h"
 
 #include <assert.h>
@@ -542,6 +546,10 @@ receive_thread(void *v)
     uint64_t *status_synack_count;
     uint64_t *status_tcb_count;
     uint64_t entropy = masscan->seed;
+    struct ResetFilter *rf;
+    
+    /* For reducing RST responses, see rstfilter_is_filter() below */
+    rf = rstfilter_create(entropy, 16384);
 
     /* some status variables */
     status_synack_count = MALLOC(sizeof(uint64_t));
@@ -828,6 +836,9 @@ receive_thread(void *v)
             case FOUND_SCTP:
                 handle_sctp(out, secs, px, length, cookie, &parsed, entropy);
                 break;
+            case FOUND_OPROTO: /* other IP proto */
+                handle_oproto(out, secs, px, length, &parsed, entropy);
+                break;
             case FOUND_TCP:
                 /* fall down to below */
                 break;
@@ -923,12 +934,19 @@ receive_thread(void *v)
                  *  This happens when we've sent a FIN, deleted our connection,
                  *  but the other side didn't get the packet.
                  */
-                if (!TCP_IS_RST(px, parsed.transport_offset))
-                tcpcon_send_FIN(
-                    tcpcon,
-                    ip_me, ip_them,
-                    port_me, port_them,
-                    seqno_them, seqno_me);
+                if (TCP_IS_RST(px, parsed.transport_offset))
+                    ; /* ignore if it's own TCP flag is set */
+                else {
+                    int is_suppress;
+                    
+                    is_suppress = rstfilter_is_filter(rf, ip_me, port_me, ip_them, port_them);
+                    if (!is_suppress)
+                        tcpcon_send_RST(
+                            tcpcon,
+                            ip_me, ip_them,
+                            port_me, port_them,
+                            seqno_them, seqno_me);
+                }
             }
 
         }
@@ -1140,6 +1158,7 @@ main_scan(struct Masscan *masscan)
      * makes lookups faster at high packet rates.
      */
     payloads_udp_trim(masscan->payloads.udp, &masscan->ports);
+    payloads_oproto_trim(masscan->payloads.oproto, &masscan->ports);
 
     /* Optimize target selection so it's a quick binary search instead
      * of walking large memory tables. When we scan the entire Internet
@@ -1203,6 +1222,7 @@ main_scan(struct Masscan *masscan)
                     parms->adapter_mac,
                     parms->router_mac,
                     masscan->payloads.udp,
+                    masscan->payloads.oproto,
                     rawsock_datalink(masscan->nic[index].adapter),
                     masscan->seed);
 
@@ -1502,6 +1522,7 @@ int main(int argc, char *argv[])
     masscan->shard.of = 1;
     masscan->min_packet_size = 60;
     masscan->payloads.udp = payloads_udp_create();
+    masscan->payloads.oproto = payloads_oproto_create();
     strcpy_s(   masscan->output.rotate.directory,
                 sizeof(masscan->output.rotate.directory),
                 ".");
@@ -1663,6 +1684,7 @@ int main(int argc, char *argv[])
          */
         {
             int x = 0;
+            x += proto_coap_selftest();
             x += smack_selftest();
             x += sctp_selftest();
             x += base64_selftest();
@@ -1677,11 +1699,13 @@ int main(int argc, char *argv[])
             x += lcg_selftest();
             x += template_selftest();
             x += ranges_selftest();
+            x += rangefile_selftest();
             x += pixie_time_selftest();
             x += rte_ring_selftest();
             x += mainconf_selftest();
             x += zeroaccess_selftest();
             x += nmapserviceprobes_selftest();
+            x += rstfilter_selftest();
 
 
             if (x != 0) {
